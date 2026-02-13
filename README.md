@@ -17,6 +17,15 @@ A real-time web dashboard for monitoring your [Antigravity AI](https://www.antig
 - **Auto-refresh** — data updates every 60 seconds, with a manual refresh button
 - **Dark glassmorphism UI** — premium design with animated progress bars and shimmer effects
 
+## 💳 Credits Explained
+
+| Credit Type | What It Tracks | Examples |
+|-------------|---------------|----------|
+| **Prompt Credits** (💬) | Standard, single-turn AI interactions | Code autocomplete, chat messages, inline edits |
+| **Flow Credits** (🔄) | Multi-step agentic workflows ("Flows") | Codebase refactoring, complex debugging, autonomous task execution |
+
+Both credit types reset monthly as part of your Antigravity plan. Flow Credits have a higher monthly allowance (e.g. 150,000 vs 50,000) because agentic tasks involve many internal model calls per user request.
+
 ## 📋 Prerequisites
 
 - **Python 3.9+** (tested with Python 3.13)
