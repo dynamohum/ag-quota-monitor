@@ -30,7 +30,7 @@ Both credit types reset monthly as part of your Antigravity plan. Flow Credits h
 
 - **Python 3.9+** (tested with Python 3.13)
 - **Antigravity** must be running (the Language Server process must be active)
-- **Linux** (uses `pgrep` and `ss` for process detection)
+- **Linux, macOS, or Windows** (uses `psutil` for cross-platform process detection)
 
 ## 🚀 Quick Start
 
@@ -54,7 +54,7 @@ Open [http://localhost:5050](http://localhost:5050) in your browser.
 mkdir -p ~/ag-quota-monitor && cd ~/ag-quota-monitor
 
 # Install Python dependencies
-pip install flask 'httpx[http2]'
+pip install flask 'httpx[http2]' psutil
 ```
 
 ### Dependencies
@@ -63,6 +63,7 @@ pip install flask 'httpx[http2]'
 |---------|---------|
 | `flask` | Web server and template rendering |
 | `httpx[http2]` | HTTP/2 client for Language Server API communication |
+| `psutil` | Cross-platform process detection and port discovery |
 
 > **Note:** The Antigravity Language Server requires HTTP/2 — standard Python HTTP libraries (`urllib`, `requests`) will not work.
 
@@ -85,8 +86,8 @@ Browser ──GET /api/quota──▶ Flask Server ──HTTP/2 POST──▶ La
    ◀── JSON response ────────◀── parsed quota data ──────────◀── GetUserStatus ───────◀──
 ```
 
-1. **Process Detection** — finds the `language_server_linux_x64` process via `pgrep`, extracts the CSRF token and port from its command-line args
-2. **Port Discovery** — uses `ss` (or `lsof` fallback) to find the process's listening ports, then tests each via HTTP/2 until a working one is found
+1. **Process Detection** — finds the Language Server process via `psutil` (cross-platform), extracts the CSRF token and port from its command-line args
+2. **Port Discovery** — uses `psutil` to enumerate the process's listening TCP ports, then tests each via HTTP/2 until a working one is found
 3. **API Proxy** — sends a `GetUserStatus` request to the Language Server over HTTP/2 with the correct CSRF token
 4. **Response Parsing** — extracts model quotas, prompt credits, flow credits, and groups models into shared quota pools
 5. **Dashboard** — renders the data with animated progress bars, live countdown timers, and a pool/model toggle

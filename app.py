@@ -5,9 +5,11 @@ over HTTP/2, and serves a web dashboard showing model quota usage.
 """
 
 import json
+import platform
 import re
-import subprocess
 from datetime import datetime, timezone
+
+import psutil
 
 import httpx
 from flask import Flask, jsonify, render_template
@@ -27,84 +29,73 @@ def _get_http_client():
     return _http_client
 
 
-def _run_cmd(cmd: str) -> str:
-    """Run a shell command and return stdout."""
-    try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=5
-        )
-        return result.stdout.strip()
-    except Exception:
-        return ""
+# Process name patterns per platform
+_LS_PROCESS_NAMES = {
+    "Linux": "language_server_linux",
+    "Darwin": "language_server_macos",
+    "Windows": "language_server_windows",
+}
 
 
 def detect_language_server():
-    """Detect the Antigravity Language Server process and extract connection params."""
+    """Detect the Antigravity Language Server process and extract connection params.
+
+    Uses psutil for cross-platform process detection (Linux, macOS, Windows).
+    """
     global _cached_connection
 
-    stdout = _run_cmd("pgrep -af language_server_linux")
-    if not stdout:
-        return None
+    os_name = platform.system()
+    ls_name = _LS_PROCESS_NAMES.get(os_name, "language_server")
 
-    lines = stdout.split("\n")
-    for line in lines:
-        if "--extension_server_port" not in line:
-            continue
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            name = proc.info["name"] or ""
+            cmdline = proc.info["cmdline"] or []
+            cmd_str = " ".join(cmdline)
 
-        parts = line.strip().split(None, 1)
-        if len(parts) < 2:
-            continue
+            # Match the Language Server process
+            if ls_name not in name and ls_name not in cmd_str:
+                continue
+            if "--extension_server_port" not in cmd_str:
+                continue
 
-        pid = int(parts[0])
-        cmd = parts[1]
+            pid = proc.info["pid"]
 
-        token_match = re.search(r"--csrf_token[=\s]+([a-zA-Z0-9\-]+)", cmd)
-        port_match = re.search(r"--extension_server_port[=\s]+(\d+)", cmd)
+            token_match = re.search(r"--csrf_token[=\s]+([a-zA-Z0-9\-]+)", cmd_str)
+            port_match = re.search(r"--extension_server_port[=\s]+(\d+)", cmd_str)
 
-        if not token_match:
-            continue
+            if not token_match:
+                continue
 
-        csrf_token = token_match.group(1)
-        extension_port = int(port_match.group(1)) if port_match else 0
+            csrf_token = token_match.group(1)
+            extension_port = int(port_match.group(1)) if port_match else 0
 
-        # Get listening ports
-        ss_output = _run_cmd(f'ss -tlnp 2>/dev/null | grep "pid={pid},"')
-        ports = []
-
-        if ss_output:
-            for ss_line in ss_output.split("\n"):
-                port_m = re.search(r"(?:\*|[\d.]+|\[[\da-f:]*\]):(\d+)", ss_line)
-                if port_m:
-                    p = int(port_m.group(1))
-                    if p not in ports:
-                        ports.append(p)
-
-        if not ports:
-            lsof_output = _run_cmd(
-                f"lsof -nP -a -iTCP -sTCP:LISTEN -p {pid} 2>/dev/null"
-            )
-            if lsof_output:
-                for lsof_line in lsof_output.split("\n"):
-                    port_m = re.search(
-                        r"(?:\*|[\d.]+|\[[\da-f:]+\]):(\d+)\s+\(LISTEN\)", lsof_line
-                    )
-                    if port_m:
-                        p = int(port_m.group(1))
+            # Get listening ports via psutil (cross-platform)
+            ports = []
+            try:
+                for conn in proc.connections(kind="inet"):
+                    if conn.status == psutil.CONN_LISTEN:
+                        p = conn.laddr.port
                         if p not in ports:
                             ports.append(p)
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                pass
 
-        ports.sort()
+            ports.sort()
 
-        # Test each port via HTTP/2
-        for port in ports:
-            if _test_port(port, csrf_token):
-                _cached_connection = {
-                    "port": port,
-                    "csrf_token": csrf_token,
-                    "pid": pid,
-                    "extension_port": extension_port,
-                }
-                return _cached_connection
+            # Test each port via HTTP/2
+            for port in ports:
+                if _test_port(port, csrf_token):
+                    _cached_connection = {
+                        "port": port,
+                        "csrf_token": csrf_token,
+                        "pid": pid,
+                        "extension_port": extension_port,
+                    }
+                    return _cached_connection
+
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
 
     return None
 
