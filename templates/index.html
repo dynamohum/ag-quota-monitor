@@ -337,7 +337,7 @@
         if (model.time_until_reset_ms <= 0) return;
 
         const resetTime = new Date(model.reset_time_iso);
-        const resetStr = resetTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const resetStr = getRelativeDateString(resetTime);
 
         let remaining = model.time_until_reset_ms;
         const endTime = Date.now() + remaining;
@@ -368,7 +368,7 @@
         if (pool.time_until_reset_ms <= 0) return;
 
         const resetTime = new Date(pool.reset_time_iso);
-        const resetStr = resetTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        const resetStr = getRelativeDateString(resetTime);
 
         let remaining = pool.time_until_reset_ms;
         const endTime = Date.now() + remaining;
@@ -412,6 +412,26 @@
     }
 
     // ─── Utilities ────────────────────────────────────
+    function getRelativeDateString(date) {
+      const now = new Date();
+      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const target = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+      const diffTime = target - today;
+      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+      const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+      if (diffDays === 0) return `Today at ${timeStr}`;
+      if (diffDays === 1) return `Tomorrow at ${timeStr}`;
+      if (diffDays > 1 && diffDays < 7) {
+        const dayName = date.toLocaleDateString('en-GB', { weekday: 'long' });
+        return `${dayName} at ${timeStr}`;
+      }
+
+      const dateStr = date.toLocaleDateString('en-GB', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      return `${dateStr} at ${timeStr}`;
+    }
+
     function escapeHTML(str) {
       if (!str) return '';
       return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
