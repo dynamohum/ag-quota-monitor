@@ -73,7 +73,7 @@ def detect_language_server():
             # Get listening ports via psutil (cross-platform)
             ports = []
             try:
-                for conn in proc.connections(kind="inet"):
+                for conn in proc.net_connections(kind="inet"):
                     if conn.status == psutil.CONN_LISTEN:
                         p = conn.laddr.port
                         if p not in ports:
