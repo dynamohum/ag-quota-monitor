@@ -1,4 +1,4 @@
-# ⚡ Antigravity Quota Monitor
+# ⚡ AntiGravity Quota Monitor
 
 A real-time web dashboard for monitoring your [Antigravity AI](https://www.antigravity.dev/) model quota usage, prompt credits, and flow credits.
 
