@@ -335,38 +335,62 @@
     function startResetTimers(models) {
       models.forEach((model, i) => {
         if (model.time_until_reset_ms <= 0) return;
+
+        const resetTime = new Date(model.reset_time_iso);
+        const resetStr = resetTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
         let remaining = model.time_until_reset_ms;
+        const endTime = Date.now() + remaining;
+
         const timer = setInterval(() => {
-          remaining -= 1000;
+          remaining = endTime - Date.now();
           const el = document.getElementById('reset-' + i);
-          if (el) {
-            el.textContent = formatCountdown(remaining);
-          }
+
           if (remaining <= 0) {
             clearInterval(timer);
             if (el) el.textContent = 'Ready!';
+          } else {
+            if (el) {
+              el.textContent = `${formatCountdown(remaining)} (${resetStr})`;
+            }
           }
         }, 1000);
         resetTimers.push(timer);
+
+        // Initial render
+        const el = document.getElementById('reset-' + i);
+        if (el) el.textContent = `${formatCountdown(remaining)} (${resetStr})`;
       });
     }
 
     function startPoolResetTimers(pools) {
       pools.forEach((pool, i) => {
         if (pool.time_until_reset_ms <= 0) return;
+
+        const resetTime = new Date(pool.reset_time_iso);
+        const resetStr = resetTime.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
         let remaining = pool.time_until_reset_ms;
+        const endTime = Date.now() + remaining;
+
         const timer = setInterval(() => {
-          remaining -= 1000;
+          remaining = endTime - Date.now();
           const el = document.getElementById('pool-reset-' + i);
-          if (el) {
-            el.textContent = formatCountdown(remaining);
-          }
+
           if (remaining <= 0) {
             clearInterval(timer);
             if (el) el.textContent = 'Ready!';
+          } else {
+            if (el) {
+              el.textContent = `${formatCountdown(remaining)} (${resetStr})`;
+            }
           }
         }, 1000);
         resetTimers.push(timer);
+
+        // Initial render
+        const el = document.getElementById('pool-reset-' + i);
+        if (el) el.textContent = `${formatCountdown(remaining)} (${resetStr})`;
       });
     }
 
