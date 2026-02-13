@@ -236,7 +236,7 @@
                style="width: ${remaining}%"></div>
         </div>
         <div class="pool-card__meta">
-          <span>⏱ Resets in: <strong id="pool-reset-${index}" title="Reset at: ${new Date(pool.reset_time_iso).toLocaleString()}" style="cursor: help; border-bottom: 1px dotted #aaa;">${formatCountdown(pool.time_until_reset_ms)}</strong></span>
+          <span>⏱ Resets in: <strong id="pool-reset-${index}">${formatCountdown(pool.time_until_reset_ms)}</strong></span>
         </div>
         <div class="pool-card__models">${chips}</div>
       </div>
@@ -325,7 +325,7 @@
         </div>
         <div class="model-card__reset">
           <span class="model-card__reset-icon">⏱</span>
-          <span>Resets in: <strong id="reset-${index}" title="Reset at: ${new Date(model.reset_time_iso).toLocaleString()}" style="cursor: help; border-bottom: 1px dotted #aaa;">${formatCountdown(model.time_until_reset_ms)}</strong></span>
+          <span>Resets in: <strong id="reset-${index}">${formatCountdown(model.time_until_reset_ms)}</strong></span>
         </div>
       </div>
     `;
