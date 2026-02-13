@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Antigravity Quota Monitor</title>
+  <meta name="description" content="Real-time quota monitoring for Antigravity AI models">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+  <div class="container" id="app">
+    <!-- Header -->
+    <header class="header">
+      <span class="header__icon">⚡</span>
+      <h1 class="header__title">Antigravity Quota Monitor</h1>
+      <p class="header__subtitle">Real-time AI model usage tracking</p>
+      <div class="header__meta">
+        <span>
+          <span class="status-dot status-dot--ok" id="statusDot"></span>
+          <span id="statusText">Connecting…</span>
+        </span>
+        <span id="lastUpdated"></span>
+        <span class="refresh-controls">
+          <button class="refresh-btn" id="refreshBtn" onclick="fetchQuota()" title="Refresh now">
+            <span class="refresh-btn__icon">↻</span> Refresh
+          </button>
+        </span>
+      </div>
+      <div class="user-info" id="userInfo" style="display:none">
+        <span id="userName"></span>
+        <span class="user-info__plan" id="planBadge"></span>
+      </div>
+    </header>
+
+    <!-- Main content -->
+    <main id="mainContent">
+      <div class="loading-container" id="loadingState">
+        <div class="loading-spinner"></div>
+        <div class="loading-text">Detecting Antigravity Language Server…</div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const POLL_INTERVAL = 60_000;
+    let pollTimer = null;
+    let quotaData = null;
+    let resetTimers = [];
+    let currentView = 'pools'; // 'pools' or 'models'
+
+    // ─── Fetch quota data ──────────────────────────────
+    async function fetchQuota() {
+      const btn = document.getElementById('refreshBtn');
+      btn.classList.add('refresh-btn--spinning');
+
+      try {
+        const res = await fetch('/api/quota');
+        const data = await res.json();
+
+        if (data.error) {
+          showError(data.error);
+          setStatus('error', 'Error');
+          return;
+        }
+
+        quotaData = data;
+        render(data);
+        setStatus('ok', 'Connected');
+        document.getElementById('lastUpdated').textContent =
+          '🕐 ' + new Date().toLocaleTimeString();
+
+      } catch (err) {
+        showError('Failed to connect to the server. Is it running?');
+        setStatus('error', 'Disconnected');
+      } finally {
+        btn.classList.remove('refresh-btn--spinning');
+      }
+    }
+
+    // ─── Status indicator ─────────────────────────────
+    function setStatus(type, label) {
+      const dot = document.getElementById('statusDot');
+      const text = document.getElementById('statusText');
+      dot.className = 'status-dot status-dot--' + type;
+      text.textContent = label;
+    }
+
+    // ─── Error state ──────────────────────────────────
+    function showError(message) {
+      document.getElementById('mainContent').innerHTML = `
+      <div class="error-container fade-in">
+        <span class="error-container__icon">⚠️</span>
+        <div class="error-container__title">Connection Issue</div>
+        <div class="error-container__msg">${escapeHTML(message)}</div>
+        <button class="error-container__retry" onclick="fetchQuota()">⟳ Retry</button>
+      </div>
+    `;
+    }
+
+    // ─── View toggle ──────────────────────────────────
+    function setView(view) {
+      currentView = view;
+      if (quotaData) render(quotaData);
+    }
+
+    // ─── Main render ──────────────────────────────────
+    function render(data) {
+      clearResetTimers();
+
+      let html = '';
+
+      // User info
+      const userInfo = document.getElementById('userInfo');
+      if (data.user_email || data.plan_name) {
+        document.getElementById('userName').textContent = data.user_email || '';
+        document.getElementById('planBadge').textContent = data.plan_name || 'Free';
+        userInfo.style.display = 'flex';
+      }
+
+      // Credits section
+      const hasCredits = data.prompt_credits || data.flow_credits;
+      if (hasCredits) {
+        html += '<div class="credits-row">';
+        if (data.prompt_credits) {
+          html += renderCreditCard('Prompt Credits', data.prompt_credits, '💬');
+        }
+        if (data.flow_credits) {
+          html += renderCreditCard('Flow Credits', data.flow_credits, '🔄');
+        }
+        html += '</div>';
+      }
+
+      // Section header with toggle
+      const totalModels = (data.models || []).length;
+      const totalPools = (data.pools || []).length;
+      const poolsActive = currentView === 'pools' ? 'view-toggle__btn--active' : '';
+      const modelsActive = currentView === 'models' ? 'view-toggle__btn--active' : '';
+
+      html += `
+      <div class="section-header">
+        <div class="section-title">
+          🤖 Model Quotas
+          <span class="section-title__count">${totalModels} models · ${totalPools} pools</span>
+        </div>
+        <div class="view-toggle">
+          <button class="view-toggle__btn ${poolsActive}" onclick="setView('pools')">
+            📦 Pools
+          </button>
+          <button class="view-toggle__btn ${modelsActive}" onclick="setView('models')">
+            📋 Models
+          </button>
+        </div>
+      </div>
+    `;
+
+      if (currentView === 'pools') {
+        html += renderPoolsView(data);
+      } else {
+        html += renderModelsView(data);
+      }
+
+      document.getElementById('mainContent').innerHTML = html;
+
+      // Start countdown timers
+      if (currentView === 'pools') {
+        startPoolResetTimers(data.pools || []);
+      } else {
+        startResetTimers(data.models || []);
+      }
+    }
+
+    // ─── Pool view ────────────────────────────────────
+    function renderPoolsView(data) {
+      if (!data.pools || data.pools.length === 0) return '';
+
+      let html = '<div class="pool-grid">';
+      data.pools.forEach((pool, i) => {
+        html += renderPoolCard(pool, i);
+      });
+      html += '</div>';
+      return html;
+    }
+
+    function renderPoolCard(pool, index) {
+      const remaining = pool.remaining_percentage ?? 0;
+      const used = pool.used_percentage ?? 0;
+      const exhausted = pool.is_exhausted;
+
+      let colorSuffix = 'green';
+      if (remaining <= 0) colorSuffix = 'red';
+      else if (remaining < 20) colorSuffix = 'red';
+      else if (remaining < 50) colorSuffix = 'amber';
+
+      let cardMod = '';
+      if (exhausted) cardMod = 'pool-card--exhausted';
+      else if (remaining > 80) cardMod = 'pool-card--healthy';
+
+      // Badge
+      let badgeClass = 'model-card__badge--ok';
+      let badgeText = remaining.toFixed(0) + '%';
+      if (exhausted) {
+        badgeClass = 'model-card__badge--exhausted';
+        badgeText = 'EXHAUSTED';
+      } else if (remaining < 20) {
+        badgeClass = 'model-card__badge--warning';
+      }
+
+      // Model chips
+      const chips = pool.models.map(m =>
+        `<span class="pool-chip" title="${escapeHTML(m.model_id)}">${escapeHTML(m.label)}</span>`
+      ).join('');
+
+      return `
+      <div class="pool-card ${cardMod} fade-in">
+        <div class="pool-card__header">
+          <div>
+            <span class="pool-card__name">${escapeHTML(pool.name)}</span>
+            <span class="pool-card__count">${pool.model_count} model${pool.model_count > 1 ? 's' : ''}</span>
+          </div>
+          <span class="model-card__badge ${badgeClass}">${badgeText}</span>
+        </div>
+        <div class="pool-card__stats">
+          <span class="pool-card__pct pool-card__pct--${colorSuffix}">${remaining.toFixed(1)}%</span>
+          <span class="pool-card__pct-label">remaining · ${used.toFixed(1)}% used</span>
+        </div>
+        <div class="pool-card__bar">
+          <div class="pool-card__bar-fill pool-card__bar-fill--${colorSuffix}"
+               style="width: ${remaining}%"></div>
+        </div>
+        <div class="pool-card__meta">
+          <span>⏱ Resets in: <strong id="pool-reset-${index}">${formatCountdown(pool.time_until_reset_ms)}</strong></span>
+        </div>
+        <div class="pool-card__models">${chips}</div>
+      </div>
+    `;
+    }
+
+    // ─── Models view ──────────────────────────────────
+    function renderModelsView(data) {
+      if (!data.models || data.models.length === 0) return '';
+
+      let html = '<div class="model-grid">';
+      data.models.forEach((model, i) => {
+        html += renderModelCard(model, i);
+      });
+      html += '</div>';
+      return html;
+    }
+
+    // ─── Credit card ──────────────────────────────────
+    function renderCreditCard(title, credits, icon) {
+      const pct = credits.remaining_percentage;
+      const barClass = pct > 50 ? '' : pct > 20 ? 'credit-bar__fill--warning' : 'credit-bar__fill--critical';
+
+      return `
+      <div class="credit-card fade-in">
+        <div class="credit-card__header">
+          <span class="credit-card__title">${icon} ${title}</span>
+        </div>
+        <div class="credit-card__value">
+          ${credits.available.toLocaleString()} <small>/ ${credits.monthly.toLocaleString()}</small>
+        </div>
+        <div class="credit-bar">
+          <div class="credit-bar__fill ${barClass}" style="width: ${pct}%"></div>
+        </div>
+      </div>
+    `;
+    }
+
+    // ─── Model card ───────────────────────────────────
+    function renderModelCard(model, index) {
+      const remaining = model.remaining_percentage ?? 0;
+      const used = model.used_percentage ?? 0;
+      const exhausted = model.is_exhausted;
+
+      // Color class
+      let colorSuffix = 'green';
+      if (remaining <= 0) colorSuffix = 'red';
+      else if (remaining < 20) colorSuffix = 'red';
+      else if (remaining < 50) colorSuffix = 'amber';
+
+      // Badge
+      let badgeClass = 'model-card__badge--ok';
+      let badgeText = remaining.toFixed(0) + '%';
+      if (exhausted) {
+        badgeClass = 'model-card__badge--exhausted';
+        badgeText = 'EXHAUSTED';
+      } else if (remaining < 20) {
+        badgeClass = 'model-card__badge--warning';
+      }
+
+      // Card modifier
+      let cardMod = '';
+      if (exhausted) cardMod = 'model-card--exhausted';
+      else if (remaining > 80) cardMod = 'model-card--healthy';
+
+      return `
+      <div class="model-card ${cardMod} fade-in">
+        <div class="model-card__top">
+          <div>
+            <div class="model-card__name">${escapeHTML(model.label)}</div>
+            <div class="model-card__id">${escapeHTML(model.model_id)}</div>
+          </div>
+          <span class="model-card__badge ${badgeClass}">${badgeText}</span>
+        </div>
+        <div class="model-card__bar-container">
+          <div class="model-card__bar-labels">
+            <span class="model-card__bar-used">Used: ${used.toFixed(1)}%</span>
+            <span class="model-card__bar-remaining model-card__bar-remaining--${colorSuffix}">
+              ${remaining.toFixed(1)}% remaining
+            </span>
+          </div>
+          <div class="model-bar">
+            <div class="model-bar__fill model-bar__fill--${colorSuffix}"
+                 style="width: ${remaining}%"></div>
+          </div>
+        </div>
+        <div class="model-card__reset">
+          <span class="model-card__reset-icon">⏱</span>
+          <span>Resets in: <strong id="reset-${index}">${formatCountdown(model.time_until_reset_ms)}</strong></span>
+        </div>
+      </div>
+    `;
+    }
+
+    // ─── Countdown timers ─────────────────────────────
+    function startResetTimers(models) {
+      models.forEach((model, i) => {
+        if (model.time_until_reset_ms <= 0) return;
+        let remaining = model.time_until_reset_ms;
+        const timer = setInterval(() => {
+          remaining -= 1000;
+          const el = document.getElementById('reset-' + i);
+          if (el) {
+            el.textContent = formatCountdown(remaining);
+          }
+          if (remaining <= 0) {
+            clearInterval(timer);
+            if (el) el.textContent = 'Ready!';
+          }
+        }, 1000);
+        resetTimers.push(timer);
+      });
+    }
+
+    function startPoolResetTimers(pools) {
+      pools.forEach((pool, i) => {
+        if (pool.time_until_reset_ms <= 0) return;
+        let remaining = pool.time_until_reset_ms;
+        const timer = setInterval(() => {
+          remaining -= 1000;
+          const el = document.getElementById('pool-reset-' + i);
+          if (el) {
+            el.textContent = formatCountdown(remaining);
+          }
+          if (remaining <= 0) {
+            clearInterval(timer);
+            if (el) el.textContent = 'Ready!';
+          }
+        }, 1000);
+        resetTimers.push(timer);
+      });
+    }
+
+    function clearResetTimers() {
+      resetTimers.forEach(t => clearInterval(t));
+      resetTimers = [];
+    }
+
+    function formatCountdown(ms) {
+      if (ms <= 0) return 'Ready!';
+      const totalMins = Math.ceil(ms / 60000);
+      if (totalMins < 60) return totalMins + 'm';
+      const hours = Math.floor(totalMins / 60);
+      const mins = totalMins % 60;
+      if (hours < 24) return hours + 'h ' + mins + 'm';
+      const days = Math.floor(hours / 24);
+      const remHours = hours % 24;
+      return days + 'd ' + remHours + 'h';
+    }
+
+    // ─── Utilities ────────────────────────────────────
+    function escapeHTML(str) {
+      if (!str) return '';
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ─── Init ─────────────────────────────────────────
+    fetchQuota();
+    pollTimer = setInterval(fetchQuota, POLL_INTERVAL);
+  </script>
+
+</body>
+
+</html>
