@@ -5,29 +5,22 @@ over HTTP/2, and serves a web dashboard showing model quota usage.
 """
 
 import json
+import logging
 import platform
 import re
+import socket
+import warnings
 from datetime import datetime, timezone
 
-import psutil
-
 import httpx
+import psutil
 from flask import Flask, jsonify, render_template
 
-app = Flask(__name__)
+# ─── Configuration ─────────────────────────────────────────────────────────────
 
-# Cached connection info
-_cached_connection = None
-# Reusable httpx client with HTTP/2
-_http_client = None
-
-
-def _get_http_client():
-    global _http_client
-    if _http_client is None:
-        _http_client = httpx.Client(http2=True, verify=False, timeout=30.0)
-    return _http_client
-
+APP_PORT = 5050
+LS_TIMEOUT = 30.0
+LS_SERVICE = "exa.language_server_pb.LanguageServerService"
 
 # Process name patterns per platform
 _LS_PROCESS_NAMES = {
@@ -36,16 +29,96 @@ _LS_PROCESS_NAMES = {
     "Windows": "language_server_windows",
 }
 
+# ─── Logging ───────────────────────────────────────────────────────────────────
 
-def detect_language_server():
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+log = logging.getLogger(__name__)
+
+# ─── Flask app ─────────────────────────────────────────────────────────────────
+
+app = Flask(__name__)
+
+
+# ─── Connection manager ────────────────────────────────────────────────────────
+
+class ConnectionManager:
+    """Manages the reusable httpx client and cached Language Server connection."""
+
+    def __init__(self):
+        self._connection: dict | None = None
+        self._client: httpx.Client | None = None
+
+    @property
+    def client(self) -> httpx.Client:
+        if self._client is None:
+            self._client = httpx.Client(http2=True, verify=False, timeout=LS_TIMEOUT)
+        return self._client
+
+    def reset(self):
+        """Close and discard the client and cached connection."""
+        if self._client:
+            try:
+                self._client.close()
+            except Exception:
+                pass
+        self._client = None
+        self._connection = None
+        log.info("ConnectionManager reset (stale connection discarded)")
+
+    def get_connection(self) -> dict | None:
+        """Return cached connection, detecting if necessary."""
+        if not self._connection:
+            self._connection = detect_language_server(self)
+        return self._connection
+
+    def invalidate_connection(self):
+        self._connection = None
+
+
+_mgr = ConnectionManager()
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────────
+
+def _ls_headers(csrf_token: str) -> dict:
+    """Return the standard headers for Language Server API requests."""
+    return {
+        "Content-Type": "application/json",
+        "Connect-Protocol-Version": "1",
+        "X-Codeium-Csrf-Token": csrf_token,
+    }
+
+
+def _quota_sort_key(x: dict):
+    """Sort key: exhausted pools/models first, then by used percentage descending."""
+    return (not x["is_exhausted"], -(x["used_percentage"] or 0))
+
+
+def get_ip() -> str:
+    """Return the machine's primary LAN IP address."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+# ─── Language Server detection ─────────────────────────────────────────────────
+
+def detect_language_server(mgr: ConnectionManager) -> dict | None:
     """Detect the Antigravity Language Server process and extract connection params.
 
     Uses psutil for cross-platform process detection (Linux, macOS, Windows).
     """
-    global _cached_connection
-
     os_name = platform.system()
     ls_name = _LS_PROCESS_NAMES.get(os_name, "language_server")
+    log.info("Scanning for Language Server process: %s", ls_name)
 
     for proc in psutil.process_iter(["pid", "name", "cmdline"]):
         try:
@@ -53,7 +126,6 @@ def detect_language_server():
             cmdline = proc.info["cmdline"] or []
             cmd_str = " ".join(cmdline)
 
-            # Match the Language Server process
             if ls_name not in name and ls_name not in cmd_str:
                 continue
             if "--extension_server_port" not in cmd_str:
@@ -70,7 +142,6 @@ def detect_language_server():
             csrf_token = token_match.group(1)
             extension_port = int(port_match.group(1)) if port_match else 0
 
-            # Get listening ports via psutil (cross-platform)
             ports = []
             try:
                 for conn in proc.net_connections(kind="inet"):
@@ -82,50 +153,48 @@ def detect_language_server():
                 pass
 
             ports.sort()
+            log.info("Found Language Server pid=%s, testing ports: %s", pid, ports)
 
-            # Test each port via HTTP/2
             for port in ports:
-                if _test_port(port, csrf_token):
-                    _cached_connection = {
+                if _test_port(mgr, port, csrf_token):
+                    connection = {
                         "port": port,
                         "csrf_token": csrf_token,
                         "pid": pid,
                         "extension_port": extension_port,
                     }
-                    return _cached_connection
+                    log.info("Connected to Language Server on port %s", port)
+                    return connection
 
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
 
+    log.warning("Language Server not found")
     return None
 
 
-def _test_port(port: int, csrf_token: str) -> bool:
+def _test_port(mgr: ConnectionManager, port: int, csrf_token: str) -> bool:
     """Test if a port responds to the Language Server API via HTTP/2."""
     try:
-        client = _get_http_client()
-        resp = client.post(
-            f"https://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/GetUnleashData",
+        resp = mgr.client.post(
+            f"https://127.0.0.1:{port}/{LS_SERVICE}/GetUnleashData",
             json={"wrapper_data": {}},
-            headers={
-                "Content-Type": "application/json",
-                "Connect-Protocol-Version": "1",
-                "X-Codeium-Csrf-Token": csrf_token,
-            },
+            headers=_ls_headers(csrf_token),
         )
         if resp.status_code == 200:
             resp.json()  # Validate JSON
             return True
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("Port %s test failed: %s", port, e)
     return False
 
 
-def fetch_quota(connection: dict) -> dict:
+# ─── Quota fetching ────────────────────────────────────────────────────────────
+
+def fetch_quota(mgr: ConnectionManager, connection: dict) -> dict:
     """Fetch quota data from the Language Server's GetUserStatus API via HTTP/2."""
-    client = _get_http_client()
-    resp = client.post(
-        f"https://127.0.0.1:{connection['port']}/exa.language_server_pb.LanguageServerService/GetUserStatus",
+    resp = mgr.client.post(
+        f"https://127.0.0.1:{connection['port']}/{LS_SERVICE}/GetUserStatus",
         json={
             "metadata": {
                 "ideName": "antigravity",
@@ -133,14 +202,29 @@ def fetch_quota(connection: dict) -> dict:
                 "locale": "en",
             }
         },
-        headers={
-            "Content-Type": "application/json",
-            "Connect-Protocol-Version": "1",
-            "X-Codeium-Csrf-Token": connection["csrf_token"],
-        },
+        headers=_ls_headers(connection["csrf_token"]),
     )
     resp.raise_for_status()
     return resp.json()
+
+
+# ─── Quota parsing ─────────────────────────────────────────────────────────────
+
+def _parse_credit_block(monthly_raw, available_raw) -> dict | None:
+    """Parse a single credit block (prompt or flow) into a normalised dict."""
+    if not monthly_raw or available_raw is None:
+        return None
+    monthly, available = int(monthly_raw), int(available_raw)
+    if monthly == 0:
+        return None
+    used = monthly - available
+    return {
+        "available": available,
+        "monthly": monthly,
+        "used": used,
+        "used_percentage": round(used / monthly * 100, 1),
+        "remaining_percentage": round(available / monthly * 100, 1),
+    }
 
 
 def parse_quota_response(data: dict) -> dict:
@@ -149,41 +233,14 @@ def parse_quota_response(data: dict) -> dict:
     plan_status = user_status.get("planStatus", {})
     plan_info = plan_status.get("planInfo", {})
 
-    # Prompt credits
-    prompt_credits = None
-    monthly = plan_info.get("monthlyPromptCredits")
-    available = plan_status.get("availablePromptCredits")
-    if monthly and available is not None:
-        monthly = int(monthly)
-        available = int(available)
-        if monthly > 0:
-            prompt_credits = {
-                "available": available,
-                "monthly": monthly,
-                "used": monthly - available,
-                "used_percentage": round(((monthly - available) / monthly) * 100, 1),
-                "remaining_percentage": round((available / monthly) * 100, 1),
-            }
-
-    # Flow credits
-    flow_credits = None
-    monthly_flow = plan_info.get("monthlyFlowCredits")
-    available_flow = plan_status.get("availableFlowCredits")
-    if monthly_flow and available_flow is not None:
-        monthly_flow = int(monthly_flow)
-        available_flow = int(available_flow)
-        if monthly_flow > 0:
-            flow_credits = {
-                "available": available_flow,
-                "monthly": monthly_flow,
-                "used": monthly_flow - available_flow,
-                "used_percentage": round(
-                    ((monthly_flow - available_flow) / monthly_flow) * 100, 1
-                ),
-                "remaining_percentage": round(
-                    (available_flow / monthly_flow) * 100, 1
-                ),
-            }
+    prompt_credits = _parse_credit_block(
+        plan_info.get("monthlyPromptCredits"),
+        plan_status.get("availablePromptCredits"),
+    )
+    flow_credits = _parse_credit_block(
+        plan_info.get("monthlyFlowCredits"),
+        plan_status.get("availableFlowCredits"),
+    )
 
     # Model quotas
     raw_models = (
@@ -202,14 +259,9 @@ def parse_quota_response(data: dict) -> dict:
         reset_time_str = quota_info.get("resetTime", "")
 
         try:
-            reset_time = datetime.fromisoformat(
-                reset_time_str.replace("Z", "+00:00")
-            )
-            time_until_reset_ms = int(
-                (reset_time - now).total_seconds() * 1000
-            )
+            reset_time = datetime.fromisoformat(reset_time_str.replace("Z", "+00:00"))
+            time_until_reset_ms = int((reset_time - now).total_seconds() * 1000)
         except Exception:
-            reset_time = None
             time_until_reset_ms = 0
 
         remaining_pct = (
@@ -223,45 +275,30 @@ def parse_quota_response(data: dict) -> dict:
             else None
         )
 
-        model_entry = {
+        models.append({
             "label": m.get("label", "Unknown"),
             "model_id": m.get("modelOrAlias", {}).get("model", "unknown"),
             "remaining_fraction": remaining_fraction,
             "remaining_percentage": remaining_pct,
             "used_percentage": used_pct,
-            "is_exhausted": remaining_fraction == 0
-            if remaining_fraction is not None
-            else False,
+            "is_exhausted": (remaining_fraction == 0) if remaining_fraction is not None else False,
             "reset_time_iso": reset_time_str,
             "time_until_reset_ms": time_until_reset_ms,
-        }
-        models.append(model_entry)
+        })
 
-    # Sort: exhausted first, then by used_percentage descending
-    models.sort(
-        key=lambda x: (
-            not x["is_exhausted"],
-            -(x["used_percentage"] or 0),
-        )
-    )
+    models.sort(key=_quota_sort_key)
 
     # Group models into quota pools (same reset_time + remaining_fraction = same pool)
-    pool_map = {}
+    pool_map: dict[str, list] = {}
     for m in models:
         pool_key = f"{m['reset_time_iso']}|{m['remaining_fraction']}"
-        if pool_key not in pool_map:
-            pool_map[pool_key] = []
-        pool_map[pool_key].append(m)
+        pool_map.setdefault(pool_key, []).append(m)
 
     pools = []
-    for pool_key, pool_models in pool_map.items():
-        # Derive a pool name from the model labels
-        labels = [m["label"] for m in pool_models]
-        pool_name = _derive_pool_name(labels)
-
+    for pool_models in pool_map.values():
         first = pool_models[0]
         pools.append({
-            "name": pool_name,
+            "name": _derive_pool_name([m["label"] for m in pool_models]),
             "models": pool_models,
             "model_count": len(pool_models),
             "remaining_fraction": first["remaining_fraction"],
@@ -272,13 +309,7 @@ def parse_quota_response(data: dict) -> dict:
             "time_until_reset_ms": first["time_until_reset_ms"],
         })
 
-    # Sort pools: exhausted first, then by used_percentage descending
-    pools.sort(
-        key=lambda x: (
-            not x["is_exhausted"],
-            -(x["used_percentage"] or 0),
-        )
-    )
+    pools.sort(key=_quota_sort_key)
 
     return {
         "timestamp": now.isoformat(),
@@ -298,7 +329,6 @@ def _derive_pool_name(labels: list) -> str:
     if len(labels) == 1:
         return labels[0]
 
-    # Check for common prefixes/families
     families = set()
     for label in labels:
         lower = label.lower()
@@ -314,12 +344,13 @@ def _derive_pool_name(labels: list) -> str:
     if len(families) == 1:
         return f"{list(families)[0]} Models"
 
-    # Mixed pool — call it "Premium Models" or list families
     family_list = sorted(families)
     if len(family_list) <= 3:
         return " / ".join(family_list) + " Models"
     return "Premium Models"
 
+
+# ─── Flask routes ──────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -328,63 +359,34 @@ def index():
 
 @app.route("/api/quota")
 def api_quota():
-    global _cached_connection, _http_client
-
-    # Try cached connection first
-    connection = _cached_connection
-    if not connection:
-        connection = detect_language_server()
+    connection = _mgr.get_connection()
 
     if not connection:
         return (
-            jsonify(
-                {"error": "Language Server not found. Is Antigravity running?"}
-            ),
+            jsonify({"error": "Language Server not found. Is Antigravity running?"}),
             503,
         )
 
     try:
-        raw_data = fetch_quota(connection)
-        parsed = parse_quota_response(raw_data)
-        return jsonify(parsed)
+        raw_data = fetch_quota(_mgr, connection)
+        return jsonify(parse_quota_response(raw_data))
     except Exception as e:
-        # Connection may have gone stale, try re-detecting
-        _cached_connection = None
-        # Reset the HTTP client too in case of stale H2 connection
-        if _http_client:
-            try:
-                _http_client.close()
-            except Exception:
-                pass
-            _http_client = None
-        connection = detect_language_server()
-        if connection:
-            try:
-                raw_data = fetch_quota(connection)
-                parsed = parse_quota_response(raw_data)
-                return jsonify(parsed)
-            except Exception as e2:
-                return jsonify({"error": f"Quota fetch failed: {str(e2)}"}), 500
-        return jsonify({"error": f"Quota fetch failed: {str(e)}"}), 500
+        log.warning("Quota fetch failed (%s), resetting and retrying: %s", type(e).__name__, e)
+        _mgr.reset()
+        connection = _mgr.get_connection()
+        if not connection:
+            return jsonify({"error": f"Quota fetch failed: {e}"}), 500
+        try:
+            raw_data = fetch_quota(_mgr, connection)
+            return jsonify(parse_quota_response(raw_data))
+        except Exception as e2:
+            log.error("Quota fetch failed after retry: %s", e2)
+            return jsonify({"error": f"Quota fetch failed: {e2}"}), 500
 
+
+# ─── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import warnings
-
-    import socket
-
-    def get_ip():
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            # doesn't even have to be reachable
-            s.connect(('10.255.255.255', 1))
-            IP = s.getsockname()[0]
-        except Exception:
-            IP = '127.0.0.1'
-        finally:
-            s.close()
-        return IP
-
     warnings.filterwarnings("ignore", message="Unverified HTTPS request")
-    print(f"🚀 Antigravity Quota Monitor starting on http://{get_ip()}:5050")
-    app.run(host="0.0.0.0", port=5050, debug=False)
+    print(f"🚀 Antigravity Quota Monitor starting on http://{get_ip()}:{APP_PORT}")
+    app.run(host="0.0.0.0", port=APP_PORT, debug=False)
